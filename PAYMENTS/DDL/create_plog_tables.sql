@@ -1,0 +1,44 @@
+--drop table pay_log$;
+--drop sequence plog$_seq; 
+
+
+create table pay_log$
+(
+  plog_id          number not null,
+  plog_log_date    date default sysdate,
+  plog_paysys_name varchar2(100),
+  plog_account     varchar2(100),
+  plog_trans_id    varchar2(100),
+  plog_pay_date    varchar2(100),
+  plog_pay_amount  varchar2(100),
+  plog_req_type    varchar2(100),
+  plog_response    varchar2(4000),
+  plog_in_ip       varchar2(100),
+  plog_pay_srv     varchar2(4000),
+  plog_request     varchar2(4000),
+  plog_inf_num     number
+);
+
+
+alter table pay_log$ add constraint plog_pk primary key (plog_id);
+
+create sequence plog$_seq minvalue 0 maxvalue 999999999999999999999999999 start with 1 increment by 1 nocache;
+
+create index pay_log$inf_num_i on pay_log$ (plog_inf_num);
+create index pay_log$account_i on pay_log$ (plog_account);
+create index pay_log$log_date_i on pay_log$ (plog_log_date);
+create index pay_log$paysys_name_i on pay_log$ (plog_paysys_name);
+
+--
+create or replace view pay_log_v$ as
+select psl.plog_id,
+       psl.plog_log_date, 
+       psl.plog_paysys_name, 
+       psl.plog_account, 
+       psl.plog_trans_id, 
+       psl.plog_pay_date, 
+       pay_p_$utils.get_pay_sum(psl.plog_paysys_name,psl.plog_pay_amount) plog_pay_sum, 
+       psl.plog_req_type, 
+       pay_p_$utils.get_result(psl.plog_paysys_name, psl.plog_response) plog_result,
+       psl.plog_request 
+  from pay_log$ psl;

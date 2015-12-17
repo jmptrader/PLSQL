@@ -1,0 +1,16 @@
+drop table rpt_parameters$;
+
+create table rpt_parameters$
+(
+  rppm_id        varchar2(50)   primary key,
+  rppm_value     varchar2(256)  not null,
+  rppm_text      varchar2(2000) not null
+);
+
+insert into rpt_parameters$ values ('ORA_ADM_MAIL','v.erin@cifra1.ru','Адресат для отправки почтового сообщения о работе ORACLE.'); 
+insert into rpt_parameters$ values ('PAY_REP_MAIL','v.erin@cifra1.ru','Адресат для отправки почтового сообщения о работе почтового шлюза.'); 
+insert into rpt_parameters$ values ('REQ_REP_MAIL','v.erin@cifra1.ru','Адресат для отправки почтового сообщения о работе монитроа обработки заявок.'); 
+insert into rpt_parameters$ values ('NET_REP_MAIL','v.erin@cifra1.ru','Адресат для отправки почтового сообщения о работе сетевых устройств.'); 
+insert into rpt_parameters$ values ('REQ_REP_SMS','+79262005433','Адресат для отправки SMS сообщения о проблеме в работе монитроа обработки заявок.'); 
+insert into rpt_parameters$ values ('ALARM_MAIL','bill@cifra1.ru','Адресат для отправки почтового сообщения о проблемах в работе автоматических процессов.'); 
+insert into rpt_parameters$ values ('ALARM_THRESHOLD','1000','Количество сообщений монитора обработки заявок, больше которого посылается предупреждение.'); 

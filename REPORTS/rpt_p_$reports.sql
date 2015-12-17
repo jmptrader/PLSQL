@@ -1,0 +1,364 @@
+create or replace package rpt_p_$reports is
+/*
+  Author  : V.ERIN
+  Created : 01.12.2014 12:00:00
+  Version : 1.0.03
+  Purpose : Объекты для создания периодических отчетов и отправке их по почте.
+  HISTORY
+  User    : Date         : Description
+  -------------------------------------------------------------------------------------------------
+  V.ERIN    01/12/2014     Создание пакета
+  -------------------------------------------------------------------------------------------------
+  V.ERIN    08/02/2015     Изменен вызов процедуры отправки email
+  -------------------------------------------------------------------------------------------------
+  V.ERIN    05/04/2015     Добавлен вызов отчетов с сервера MIS
+  -------------------------------------------------------------------------------------------------
+  V.ERIN    08/04/2015     Добавлена процедура отчета по отправке SMS
+  -------------------------------------------------------------------------------------------------
+*/
+  -- Константы
+  c_job_name         constant varchar2(50)  := 'REP_';
+  c_cr_lf            constant varchar2(10)  := utl_tcp.crlf;
+  c_alarm_threshold  constant integer       := rpt_p_$utils.get_param_value('ALARM_THRESHOLD',1000);
+  c_alarm_mail       constant varchar2(256) := rpt_p_$utils.get_param_value('ALARM_MAIL','bill@cifra1.ru');
+  c_cdr_rep_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('CDR_REP_MAIL');
+  c_net_rep_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('NET_REP_MAIL');
+  c_req_rep_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('REQ_REP_MAIL');
+  c_pay_rep_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('PAY_REP_MAIL');
+  c_ora_adm_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('ORA_ADM_MAIL');
+  c_sms_rep_mail     constant varchar2(256) := rpt_p_$utils.get_param_value('SMS_REP_MAIL');
+  c_req_rep_sms      constant varchar2(256) := rpt_p_$utils.get_param_value('REQ_REP_SMS');
+  c_pay_cnt_name     constant varchar2(50)  := 'PAY_CNT';
+  c_netflow_name     constant varchar2(50)  := 'NETFLOW_DATE';
+  --
+  -- Процедура подготовки отчета об отправке SMS
+  --
+  procedure sms_stat_rpt;
+  --
+  -- Процедура подготовки отчета о вызовах МегаФон
+  --
+  procedure mgf_stat_rpt;
+  --
+  -- Процедура подготовки отчета о вызовах
+  --
+  procedure cdr_stat_rpt;
+  --
+  -- Процедура подготовки отчета о работоспособности загрузчика NETFLOW
+  --
+  procedure net_stat_rpt;
+  --
+  -- Процедура подготовки отчета о работоспособности СУБД
+  --
+  procedure ora_stat_rpt;
+  --
+  -- Процедура подготовки статистического отчета по филиалам
+  --
+  procedure all_filial_stat_rpt;
+  --
+  -- Процедура подготовки и отправки статистического отчета о созданных заявках
+  --
+  procedure req_stat_rpt;
+  --
+  -- Процедура подготовки и отправки статистического отчета о платежах
+  --
+  procedure pay_stat_rpt;
+  --
+  -- Процедура создания процесса отправки отчета
+  --
+  procedure create_rpt_jobs(p_rpt_proc_name in varchar2, p_start_date in date, p_interval in varchar2 default null);
+  --
+  -- Процедура удаления процесса отправки отчета
+  --
+  procedure drop_rpt_jobs(p_rpt_proc_name in varchar2);
+  --
+end rpt_p_$reports;
+/
+create or replace package body rpt_p_$reports is
+  --
+  -- Процедура подготовки отчета об отправке SMS
+  --
+  procedure sms_stat_rpt is
+    v_rep_sql  varchar2(2000) := '';
+    v_ret      number;
+    v_subject  varchar2(256)   := 'Отчет об отправке SMS на '||to_char(sysdate-1, 'dd.mm.yyyy');
+  begin
+    v_rep_sql := 'select decode(grouping(sl.sms_name),1,''Всего'',sl.sms_name) "Тип SMS", '||
+                 '       count(1) "Количество SMS",'||
+                 '       to_char(sum(sl.sms_parts))||'' р.'' "Стоимость"  '||
+                 '  from sms_log$ sl '||
+                 ' where trunc(sl.sms_date,''MM'') = trunc(sysdate-1,''MM'')'||
+                 ' group by rollup(sl.sms_name)';
+    v_ret := reqmon.utl_p_$mail_reports.send_report(p_mail_receiver => c_sms_rep_mail,
+                                                    p_rep_name      => v_subject,
+                                                    p_rep_sql       => v_rep_sql);
+    if v_ret <> 0 then
+      raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret));
+    end if;
+  end;
+  --
+  -- Процедура подготовки отчета о вызовах МегаФон
+  --
+  procedure mgf_stat_rpt is
+    v_rep_sql   varchar2(2000) := '';
+    v_ret       number;
+    v_rep_data  reqmon.utl_p_$send_messages.text_table_t := reqmon.utl_p_$send_messages.text_table_t(null); 
+    v_data      utl_p_$send_reports.text_table_t@dbl_mis := utl_p_$send_reports.text_table_t@dbl_mis(null);
+    v_subject   varchar2(256)   := 'Отчет о вызовах МегаФон на '||to_char(sysdate, 'dd.mm.yyyy hh24:mi');
+  begin
+    v_rep_sql := 'select to_char(trunc(m.dt), ''dd.mm.yyyy'') dat, count(1) cnt_calls, round(sum(m.real_duration/60), 2) duration  '||
+                 '  from mis_cdr m '||
+                 '  join information@dbl_bill i on trunc(sysdate-1) between INF_BDATE and nvl(INF_EDATE, to_date(''01.01.2099'',''dd.mm.yyyy''))'||
+                 ' where m.period_id = i.inf_num and station_id =100 and m.out_TRANK_ID=22121 '||
+                 ' group by trunc(m.dt) order by trunc(m.dt)';
+    v_ret := utl_p_$send_reports.make_report_data@dbl_mis(v_rep_sql, v_data, ';');
+    if v_ret <> 0 then
+      raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret));
+    else
+      for i in 1..v_data.last loop
+         v_rep_data.extend;
+         v_rep_data(v_rep_data.last) :=  v_data(i);
+      end loop;
+      v_ret := reqmon.utl_p_$send_messages.send_mail(c_cdr_rep_mail, v_subject, v_subject, v_subject||'.csv' , v_rep_data);
+      if v_ret <> 0 then
+         raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret));
+      end if;
+    end if;
+    rollback;
+  end;
+  --
+  -- Процедура подготовки отчета о вызовах
+  --
+  procedure cdr_stat_rpt is
+    v_rep_sql  varchar2(2000) := '';
+    v_ret      number;
+    v_subject  varchar2(256)   := 'Отчет о вызовах на '||to_char(sysdate, 'dd.mm.yyyy hh24:mi');
+  begin
+    v_rep_sql := 'select to_char(trunc(m.dt), ''dd.mm.yyyy'') dat, count(1) cnt_calls, round(sum(m.real_duration/60), 2) duration '||
+                 '  from mis.mis_cdr m '||
+                 '  join cifra.information i on trunc(sysdate-1) between INF_BDATE and nvl(INF_EDATE, to_date(''01.01.2099'',''dd.mm.yyyy'')) '||
+                 ' where i.inf_num = m.period_id and m.station_id = ''13''' ||
+                 '   and ( regexp_like(m.out_trank, ''C12700[7,8]'') or regexp_like(m.out_trank, ''C12702[6,7]'') )'||
+                 ' group by trunc(m.dt) order by trunc(m.dt)';
+    v_ret := reqmon.utl_p_$mail_reports.send_report(p_mail_receiver => c_cdr_rep_mail,
+                                                    p_rep_name      => v_subject,
+                                                    p_rep_sql       => v_rep_sql);
+    if v_ret <> 0 then
+      raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret));
+    end if;
+  end;
+  --
+  -- Процедура подготовки отчета о работоспособности загрузчика NETFLOW
+  --
+  procedure net_stat_rpt is
+    v_msg_body  varchar2(32767) := '';
+    v_ret       reqmon.utl_p_$send_messages.http_resp_t;
+    v_subject   varchar2(256)   := 'Отчет о загрузке трафика NETFLOW на '||to_char(sysdate, 'dd.mm.yyyy hh24:mi');
+  begin
+    for tbspce_rec in (select count(1) cnt, 
+                              to_char(trunc(t.bdate,'hh24'),'dd.mm.yyyy hh24:mi')||' - '||to_char(trunc(t.edate,'hh24'),'hh24:mi') dt 
+                        from cifra.m3_traf_flows t  
+                       where t.bdate > trunc(sysdate)-1/86400 group by trunc(t.bdate,'hh24'), trunc(t.edate,'hh24') order by 2 desc) loop
+        v_msg_body := v_msg_body||'Дата: '||tbspce_rec.dt||' Загружено записей: '||tbspce_rec.cnt||c_cr_lf;
+    end loop;
+      -- Отправляем отчет если есть информация.
+    if (c_net_rep_mail is not null) then
+       if (v_msg_body is null) then
+         v_msg_body := 'За текщий день не обнаружено записей NETFLOW.';  
+       end if;
+       v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_net_rep_mail,
+                                                                p_mail_subject  => v_subject,
+                                                                p_mail_message  => v_msg_body); 
+    end if;
+  end;
+  --
+  -- Процедура подготовки отчета о работоспособности СУБД
+  --
+  procedure ora_stat_rpt is
+    v_usage_table_thr integer := 95;
+    v_msg_body  varchar2(32767) := '';
+    v_ret       reqmon.utl_p_$send_messages.http_resp_t;
+    v_subject   varchar2(256)   := 'Отчет о использовании табличного пространства на '||to_char(sysdate, 'dd.mm.yyyy');
+  begin
+    for tbspce_rec in (select tum.tablespace_name tblspace_name, round(tum.used_percent,2) usage  
+                         from dba_tablespace_usage_metrics tum 
+                        where round(tum.used_percent) > v_usage_table_thr) loop
+        v_msg_body := v_msg_body||'TABLESPACE: '||tbspce_rec.tblspace_name||' usage (%) '||tbspce_rec.usage;
+    end loop;
+    -- Отправляем отчет если есть информация.
+    if (v_msg_body is not null) then
+       v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_ora_adm_mail,
+                                                                p_mail_subject  => v_subject,
+                                                                p_mail_message  => v_msg_body); 
+    end if;
+  end;
+  --
+  -- Процедура подготовки статистического отчета по филиалам
+  --
+  procedure all_filial_stat_rpt is
+  begin
+    execute immediate 'truncate table stat_all_filial_t$';
+    execute immediate 'insert into stat_all_filial_t$ select * from stat_all_filial_v$';
+    commit;
+  end;
+  --
+  -- Процедура подготовки и отправки статистического отчета о созданных заявках
+  --
+  procedure req_stat_rpt is
+    v_msg_body  varchar2(32767) := 'Отчет на '||to_char(sysdate, 'dd.mm.yyyy hh24:mi')||c_cr_lf||c_cr_lf;
+    v_ret       reqmon.utl_p_$send_messages.http_resp_t;
+    v_subject   varchar2(256)   := 'Отчет по отправке сообщений на '||to_char(sysdate, 'dd.mm.yyyy');
+    v_alrm_msg  varchar2(256);
+    v_new_cnt   integer;
+    v_ok_cnt    integer;
+    -- Функция подсчета количества ошибок при отправке СМС
+    function get_req_err_count return integer is
+      v_req_cnt   integer;
+    begin
+      select count(1) cnt into v_req_cnt 
+        from reqmon.requests$ rq 
+       where trunc(rq.rqst_dt_status) = trunc(sysdate)
+         and rq.rqst_type in (reqmon.req_p_$process.c_sms_req, reqmon.req_p_$process.c_mail_req) 
+         and rq.rqst_status < 0;
+      return v_req_cnt;
+    end;
+    -- Функция подсчета количества заявок заданного типа
+    function get_req_count(p_rqst_status in integer) return integer is
+      v_req_cnt   integer;
+    begin
+      select count(1) cnt into v_req_cnt 
+        from reqmon.requests$ rq 
+       where trunc(rq.rqst_dt_status) = trunc(sysdate)
+         and rq.rqst_type in (reqmon.req_p_$process.c_sms_req, reqmon.req_p_$process.c_mail_req) 
+         and rq.rqst_status = p_rqst_status;
+      return v_req_cnt;
+    end;
+  begin
+    v_new_cnt := get_req_count(reqmon.req_p_$process.c_new_req);
+    v_ok_cnt  := get_req_count(reqmon.req_p_$process.c_ok_req);
+    -- Если "много" сообщений - шлем alarm
+    if ( v_new_cnt > c_alarm_threshold ) then
+       v_alrm_msg := 'Количество новых заявок : '||to_char(v_new_cnt);
+       v_subject  := 'Внимание! Возможно проблема в работе монитора обработки сообщений.';       
+       v_ret := reqmon.utl_p_$send_messages.send_sms(p_sms_receiver => c_req_rep_sms,
+                                                     p_sms_message  => v_alrm_msg );
+       -- Отправляем заявку об аномальной ситуации
+       v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_alarm_mail,
+                                                                p_mail_subject  => v_subject,
+                                                                p_mail_message  => v_alrm_msg); 
+    end if;
+    -- Заголовок отчета
+    v_msg_body := v_msg_body||'Всего заявок в статусе "Создана" : '||v_new_cnt||c_cr_lf||c_cr_lf;
+    v_msg_body := v_msg_body||'Всего заявок в статусе "Обработана" : '||v_ok_cnt||c_cr_lf||c_cr_lf;
+    v_msg_body := v_msg_body||'Всего ошибок при обработке заявок : '||get_req_err_count||c_cr_lf||c_cr_lf;
+    v_msg_body := v_msg_body||'Разбивка по типам и статусам заявок. '||c_cr_lf;
+    -- Считываем строки отчета
+    for rpt_rec in (select count(1) cnt, rq.rqst_name rqnm, reqmon.req_p_$process.get_reqst_name(rq.rqst_status) rqst 
+                      from reqmon.requests$ rq 
+                     where trunc(rq.rqst_dt_status) = trunc(sysdate)
+                       and rq.rqst_type in (reqmon.req_p_$process.c_sms_req, reqmon.req_p_$process.c_mail_req)
+                     group by rq.rqst_name, rq.rqst_status
+                     order by rqst) loop
+      v_msg_body := v_msg_body||c_cr_lf||'( Статус: '||rpt_rec.rqst||' ) - Тип сообщения : '||rpt_rec.rqnm||' - Количество: '||rpt_rec.cnt||c_cr_lf;
+    end loop;
+    -- Отправляем отчет по почте
+    v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_req_rep_mail,
+                                                             p_mail_subject  => v_subject||' (Отправлено: '||v_ok_cnt||')',
+                       	                                     p_mail_message  => v_msg_body); 
+    if v_ret.resp_code <> 0 then
+       raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret.resp_code)); 
+    end if;
+  end;
+  --
+  -- Процедура подготовки и отправки статистического отчета о платежах
+  --
+  procedure pay_stat_rpt is
+    v_msg_body   varchar2(32767) := 'Отчет на '||to_char(sysdate, 'dd.mm.yyyy hh24:mi')||c_cr_lf||c_cr_lf;
+    v_ret        reqmon.utl_p_$send_messages.http_resp_t;
+    v_subject    varchar2(256)   := 'Отчет по поступлению платежей за '||to_char(sysdate,'dd.mm.yyyy');
+    v_alrm_msg   varchar2(256)   := 'Внимание! Количество поступивших платежей не изменилось за период наблюдения. Проверьте платежный шлюз.';
+    v_pay_cnt    number := 0;
+    v_ptotal_cnt number := rpt_p_$utils.get_param_value(c_pay_cnt_name, 0);
+    v_ctotal_cnt number := 0;
+    v_rec_num    number := 1;
+    -- Функция подсчета количества платежей
+    function get_pay_count return integer is
+      v_cnt   integer;
+    begin
+      select count(1) cnt into v_cnt 
+       from payments.pay_log$ t 
+      where t.plog_req_type = 'PAY';
+      return v_cnt;
+    end;
+  begin
+    v_ctotal_cnt := get_pay_count;
+    rpt_p_$utils.set_param_value(c_pay_cnt_name,v_ctotal_cnt);
+   -- Если платежи не меняются - шлем alarm
+    if ( v_ptotal_cnt = v_ctotal_cnt ) then
+       v_subject  := 'Внимание! Возможно проблема в работе платежного шлюза.';       
+       v_ret := reqmon.utl_p_$send_messages.send_sms(p_sms_receiver => c_req_rep_sms,
+                                                     p_sms_message  => v_alrm_msg );
+       -- Отправляем заявку об аномальной ситуации
+       v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_alarm_mail,
+                                                                p_mail_subject  => v_subject,
+                                                                p_mail_message  => v_alrm_msg); 
+    end if;
+    -- Заголовок отчета
+    v_msg_body := v_msg_body||'Поступление платежей по банкам (ПС) в течение текущего дня. '||c_cr_lf;
+    -- Считываем строки отчета
+    for pay_rec in (select count(1) cnt, 
+                           trim(to_char(sum(t.plog_pay_sum),'999999990.00')) amount,
+                           t.plog_paysys_name bank
+                      from payments.pay_log_v$ t 
+                     where t.plog_req_type = 'PAY'
+                       and t.plog_result = 'OK' 
+                       and trunc(t.plog_log_date) = trunc(sysdate) 
+                     group by t.plog_paysys_name 
+                     order by 2) loop
+      v_msg_body := v_msg_body||c_cr_lf||to_char(v_rec_num,'09')||' ( Банк: '||pay_rec.bank||' ) - Количество: '||pay_rec.cnt||' - Сумма: '||pay_rec.amount||c_cr_lf;
+      v_rec_num  := v_rec_num + 1;
+      v_pay_cnt  := v_pay_cnt + pay_rec.cnt;
+    end loop;
+    v_msg_body := v_msg_body||c_cr_lf||'ВСЕГО: '||v_pay_cnt||c_cr_lf;
+    -- Отправляем отчет по почте
+    v_ret.resp_code := reqmon.utl_p_$send_messages.send_mail(p_mail_receiver => c_pay_rep_mail,
+                                                             p_mail_subject  => v_subject||' (Всего: '||v_pay_cnt||')',
+                       	                                     p_mail_message  => v_msg_body); 
+    if v_ret.resp_code <> 0 then
+       raise_application_error(-20000, 'Not sent. Error : '||to_char(v_ret.resp_code)); 
+    end if;
+  end;
+  --
+  -- Процедура создания процесса отправки отчета
+  --
+  procedure create_rpt_jobs(p_rpt_proc_name in varchar2, p_start_date in date, p_interval in varchar2) is
+    v_interval varchar2(256);
+  begin
+    if p_interval is null then
+      v_interval := 'freq=hourly;byhour=0,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23';
+    else
+      v_interval := p_interval;
+    end if;
+    -- Создаем процесс 
+    dbms_scheduler.create_job(job_name            => c_job_name||upper(p_rpt_proc_name),
+                              job_type            => 'PLSQL_BLOCK',
+                              job_action          => 'begin rpt_p_$reports.'||p_rpt_proc_name||'; end; ',
+                              start_date          => p_start_date,
+                              repeat_interval     => v_interval,
+                              end_date            => to_date(null),
+                              job_class           => 'DEFAULT_JOB_CLASS',
+                              enabled             => false,
+                              auto_drop           => false,
+                              comments            => 'Процесс запуска отправки отчета '||upper(p_rpt_proc_name));
+    commit;
+  end;
+  --
+  -- Процедура удаления процесса отправки отчета
+  --
+  procedure drop_rpt_jobs(p_rpt_proc_name in varchar2) is
+  begin  
+    dbms_scheduler.drop_job(c_job_name||upper(p_rpt_proc_name));
+  end;
+begin
+  null;
+end rpt_p_$reports;
+/

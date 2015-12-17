@@ -1,0 +1,50 @@
+-- create tables
+create table sms_log_files$
+(
+  smfl_id         number not null,
+  file_name       varchar2(50),
+  start_date      date,
+  processed_date  date,
+  processed_rec   number,
+  error_rec       number
+);
+
+create table sms_log$
+(
+  smlg_smfl_id  number not null,
+  rec_num       number not null,
+  sms_name      varchar2(50),
+  sms_phone     varchar2(50),
+  sms_text      varchar2(4000),
+  sms_response  varchar2(256),
+  sms_parts     number,
+  sms_date      date default sysdate
+);
+
+create table sms_error_log$
+(
+  selg_smfl_id  number not null,
+  rec_num       number not null,
+  file_text     varchar2(4000),
+  load_err      varchar2(4000)
+);
+
+-- add/modify columns 
+--alter table sms_log$ modify sms_text varchar2(4000);
+--alter table sms_log$ modify sms_response varchar2(4000);
+
+
+alter table sms_log$ add constraint smlg_pk primary key (smlg_smfl_id, rec_num);
+alter table sms_log_files$ add constraint smfl_pk primary key (smfl_id);
+alter table sms_error_log$ add constraint selg_pk primary key (selg_smfl_id, rec_num);
+
+alter table sms_log$ add constraint smlg_smfl_fk foreign key (smlg_smfl_id) references sms_log_files$ (smfl_id);
+alter table sms_error_log$ add constraint selg_smfl_fk foreign key (selg_smfl_id) references sms_log_files$ (smfl_id);
+
+create index sms_log$_sms_name_i on sms_log$ (sms_name);
+create index sms_log$_sms_date_i on sms_log$ (sms_date);
+
+create sequence smfl$_seq minvalue 0 maxvalue 999999999999999999999999999 start with 1 increment by 1 nocache;
+
+
+
